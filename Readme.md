@@ -70,14 +70,14 @@ accuracy, since classes are imbalanced).
 confidently predicts "Entire home/apt" at 85%, correctly reading price
 and host scale as strong signals for a whole-place rental.*
 
-![Entire home/apt prediction](screenshots/entire-home.png)
+![Entire home/apt prediction](entire-home.png)
 
 ### 2. Private room — moderate price, high review turnover
 *Brooklyn, Bedford-Stuyvesant — $55/night, 4.1 reviews/month. Lower price
 combined with frequent turnover is typical of a single room in someone's
 home rather than a whole unit.*
 
-![Private room prediction](screenshots/private-room.png)
+![Private room prediction](private-room.png)
 
 ### 3. Shared room — the model's hardest, rarest class
 *Brooklyn, Bushwick — $15/night, 5 listings by the same host, full-year
@@ -88,7 +88,7 @@ most underrepresented class in the training set, so the model is
 appropriately less certain here — not a bug, a real signal about data
 scarcity.*
 
-![Shared room prediction](screenshots/shared-room.png)
+![Shared room prediction](shared-room.png)
 
 ---
 
