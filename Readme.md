@@ -48,29 +48,64 @@
 ## 🏗️ Architecture
 
 ```mermaid
-flowchart LR
+flowchart TB
     User(["👤 User"])
-    FE["🖥️ Frontend\nindex.html + script.js\n(skyline visual reacts to prediction)"]
-
-    subgraph API["⚡ FastAPI (main.py)"]
-        Pydantic["Features(BaseModel)\nfield-level validation\n(lat/lon range, price > 0, ...)"]
-        Predict["POST /predict"]
+    subgraph FE["🖥️ Frontend"]
+        direction TB
+        HTML["index.html\nlisting form"]
+        JS["script.js\nbuilds request payload,\nrenders skyline reacting\nto the prediction"]
+        HTML --> JS
     end
-
-    Pipeline[("📦 Model_Pipeline.pkl\nColumnTransformer + RandomForest\nloaded once at startup via joblib")]
-
-    User --> FE -- "listing attributes" --> Predict
-    Predict --> Pydantic
-    Pydantic -- "validated row" --> Pipeline
-    Pipeline -- "prediction +\nclass probabilities" --> FE
-
-    style Pipeline fill:#0d1117,color:#fff,stroke:#F7931E
-    style Pydantic fill:#1f2937,color:#fff,stroke:#009688
+    
+    subgraph API["⚡ FastAPI (main.py)"]
+        direction TB
+        Route["POST /predict"]
+        subgraph Validate["Features(BaseModel) — Pydantic"]
+            direction LR
+            V1{"latitude/longitude\nin NYC range?"}
+            V2{"price > 0?"}
+            V3{"1 ≤ minimum_nights\n≤ 365?"}
+            V4{"0 ≤ availability_365\n≤ 365?"}
+        end
+        Reject422["422 Unprocessable Entity"]
+        
+        Route --> Validate
+        V1 & V2 & V3 & V4 -- "any fails" --> Reject422
+    end
+    
+    subgraph Pipeline["📦 Model_Pipeline.pkl (joblib, loaded once at startup)"]
+        direction TB
+        CT["ColumnTransformer"]
+        subgraph NumBranch["Numeric branch"]
+            direction TB
+            NImp["Median imputer"]
+            NScale["StandardScaler"]
+            NImp --> NScale
+        end
+        subgraph CatBranch["Categorical branch"]
+            direction TB
+            CImp["Most-frequent imputer"]
+            OHE["OneHotEncoder\nhandle_unknown='ignore'"]
+            CImp --> OHE
+        end
+        CT --> NumBranch
+        CT --> CatBranch
+        RF["RandomForestClassifier\n(tuned, class_weight='balanced')"]
+        NumBranch --> RF
+        CatBranch --> RF
+    end
+    
+    User --> FE
+    JS -- "listing attributes (JSON)" --> Route
+    Validate -- "validated row" --> CT
+    RF -- "prediction +\nclass probabilities" --> JS
+    
+    style Reject422 fill:#450a0a,color:#fff,stroke:#dc2626
+    style RF fill:#0d1117,color:#fff,stroke:#F7931E
+    style CT fill:#1f2937,color:#fff,stroke:#F7931E
 ```
 
-The `ColumnTransformer` + model are serialized together as a **single artifact**, so the imputation values, scaling parameters, and one-hot categories learned during training are exactly what's applied at inference — there's no separate encoder for `main.py` to keep in sync by hand.
-
-**One caveat, stated plainly:** the notebook's outlier handling — clipping `price` and `minimum_nights` at the 99th percentile, and filling missing `reviews_per_month` with `0` — runs on the raw DataFrame *before* it reaches the pipeline (notebook cells 25–26), so that step is **not** part of the serialized artifact. Pydantic's field validators enforce sane ranges at the API boundary (`price > 0`, `minimum_nights` 1–365), but they don't reproduce that specific 99th-percentile cap — so a request with a genuinely extreme `price` or `minimum_nights` bypasses the clipping the model was actually trained on. Worth folding into a `FunctionTransformer` inside the pipeline if this were hardened further.
+The entire preprocessing + model logic ships as a single serialized artifact — `main.py` contains no feature-engineering code of its own, only the Pydantic validators shown above. Every request that passes validation flows through the exact `ColumnTransformer` branches learned at training: numeric columns get median-imputed then scaled, categorical columns get most-frequent-imputed then one-hot encoded, and both branches feed the same tuned Random Forest.
 
 ---
 
@@ -86,19 +121,41 @@ The `ColumnTransformer` + model are serialized together as a **single artifact**
 flowchart TD
     A["📄 AB_NYC_2019.csv\n48,895 listings"]
     B["🔍 EDA\nmissing values · univariate/bivariate analysis\ncorrelation heatmap · geographic scatter"]
-    C["🧹 Cleaning\ndrop id/name/host_id/host_name/last_review\nreviews_per_month NaN → 0\nclip price & minimum_nights at 99th percentile"]
+    
+    subgraph Cleaning["🧹 Cleaning"]
+        direction TB
+        C1["Drop id, name, host_id,\nhost_name, last_review"]
+        C2["reviews_per_month\nNaN → 0"]
+        C3["Clip price &\nminimum_nights at\n99th percentile"]
+        C1 --> C2 --> C3
+    end
+    
     D["✂️ Stratified Train/Test Split\n67% / 33%, stratify=y\n(test set untouched until final eval)"]
-    E["🔧 ColumnTransformer\nnumeric: median impute + scale\ncategorical: most-frequent impute + one-hot"]
-    F["🏁 Compare 4 models\n3-fold stratified CV\naccuracy + macro-F1"]
-    G["🎯 RandomizedSearchCV\non Random Forest\n10 iters, 3-fold, scoring=f1_macro"]
+    
+    subgraph Prep["🔧 ColumnTransformer (fit on train only)"]
+        direction LR
+        PNum["Numeric:\nimpute → scale"]
+        PCat["Categorical:\nimpute → one-hot"]
+    end
+    
+    subgraph Compare["🏁 Compare 4 models — 3-fold stratified CV"]
+        direction LR
+        M1["Logistic\nRegression"]
+        M2["Decision\nTree"]
+        M3["Random\nForest"]
+        M4["Gradient\nBoosting"]
+    end
+    
+    G["🎯 RandomizedSearchCV on\nRandom Forest\n10 iters, 3-fold, scoring=f1_macro"]
     H["✅ Final test evaluation\n(touched exactly once)"]
     I["💾 joblib.dump(Pipeline)\nModel_Pipeline.pkl"]
-
-    A --> B --> C --> D --> E --> F --> G --> H --> I
-
-    style C fill:#1f2937,color:#fff,stroke:#60a5fa
+    
+    A --> B --> Cleaning --> D --> Prep --> Compare --> G --> H --> I
+    
+    style C3 fill:#1f2937,color:#fff,stroke:#60a5fa
     style G fill:#3b1d0f,color:#fff,stroke:#f97316
     style H fill:#052e16,color:#fff,stroke:#22c55e
+    style M3 fill:#0d1117,color:#fff,stroke:#F7931E
 ```
 
 **Cleaning decisions, and why:**
@@ -119,6 +176,10 @@ A single `ColumnTransformer`, fit only on training data to avoid leakage:
 | **Categorical** | `neighbourhood_group`, `neighbourhood` | Most-frequent imputation → `OneHotEncoder(handle_unknown="ignore")` |
 
 `handle_unknown="ignore"` matters specifically for `neighbourhood` — with 200+ unique NYC neighbourhoods, a listing from a neighbourhood the model never saw in training would otherwise crash inference instead of gracefully encoding as all-zeros.
+
+The `ColumnTransformer` + model are serialized together as a **single artifact**, so the imputation values, scaling parameters, and one-hot categories learned during training are exactly what's applied at inference — there's no separate encoder for `main.py` to keep in sync by hand.
+
+**One caveat, stated plainly:** the notebook's outlier handling — clipping `price` and `minimum_nights` at the 99th percentile, and filling missing `reviews_per_month` with `0` — runs on the raw DataFrame *before* it reaches the pipeline (notebook cells 25–26), so that step is **not** part of the serialized artifact. Pydantic's field validators enforce sane ranges at the API boundary (`price > 0`, `minimum_nights` 1–365), but they don't reproduce that specific 99th-percentile cap — so a request with a genuinely extreme `price` or `minimum_nights` bypasses the clipping the model was actually trained on. Worth folding into a `FunctionTransformer` inside the pipeline if this were hardened further.
 
 ---
 
@@ -177,7 +238,8 @@ sequenceDiagram
     participant FE as Frontend
     participant API as FastAPI /predict
     participant Val as Pydantic Features
-    participant Pipe as Model_Pipeline.pkl
+    participant CT as ColumnTransformer
+    participant RF as RandomForestClassifier
 
     FE->>API: POST /predict {listing attributes}
     API->>Val: validate (lat/lon range, price > 0,\nminimum_nights 1-365, availability_365 0-365, ...)
@@ -185,9 +247,12 @@ sequenceDiagram
         Val-->>FE: 422 Unprocessable Entity
     end
     Val-->>API: validated Features
-    API->>Pipe: pipeline.predict(row)\npipeline.predict_proba(row)
-    Note over Pipe: ColumnTransformer applies the exact\nimpute/scale/encode learned at training —\nno manual preprocessing in main.py at all
-    Pipe-->>API: predicted class + probabilities
+    API->>CT: transform(row)
+    CT->>CT: numeric branch: impute → scale
+    CT->>CT: categorical branch: impute → one-hot
+    CT-->>API: transformed feature vector
+    API->>RF: predict(vector) + predict_proba(vector)
+    RF-->>API: predicted class + probabilities
     API-->>FE: {Predicted_room_type, Probability}
 ```
 
